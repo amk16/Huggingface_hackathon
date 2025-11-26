@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import logging
 import pandas as pd
@@ -81,10 +82,24 @@ async def main(max_targets: int = 10):
 
 
 if __name__ == "__main__":
+    # Print immediately to verify script is running
+    print("=" * 60, flush=True)
+    print("SCRAPER STARTED", flush=True)
+    print("=" * 60, flush=True)
+    
     max_targets_env = os.getenv("MAX_TARGETS")
     try:
         max_targets = int(max_targets_env) if max_targets_env else 10
     except (TypeError, ValueError):
         max_targets = 10
+    
+    print(f"Max targets: {max_targets}", flush=True)
+    print(f"Python version: {sys.version}", flush=True)
+    print(f"Working directory: {os.getcwd()}", flush=True)
+    print("-" * 60, flush=True)
 
     asyncio.run(main(max_targets=max_targets))
+    
+    print("=" * 60, flush=True)
+    print("SCRAPER COMPLETED", flush=True)
+    print("=" * 60, flush=True)

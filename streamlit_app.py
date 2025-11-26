@@ -149,26 +149,46 @@ def run_scraper_from_ui(max_targets: int):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Redirect stderr to stdout to capture all logs
             text=True,
-            bufsize=0,  # Unbuffered
+            bufsize=1,  # Line buffered
             env=env,
             universal_newlines=True,
         )
         
-        # Use communicate() to get all output - this is more reliable
-        stdout_output, _ = process.communicate()
-        return_code = process.returncode
+        # Use communicate() with timeout to get all output
+        try:
+            stdout_output, _ = process.communicate(timeout=600)  # 10 minute timeout
+            return_code = process.returncode
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout_output, _ = process.communicate()
+            return_code = -1
+            stdout_output = (stdout_output or "") + "\n[ERROR] Process timed out after 10 minutes"
         
         # Clean up the output
         stdout_text = stdout_output.strip() if stdout_output else ""
         
+        # If we got no output, add diagnostic information
+        if not stdout_text:
+            stdout_text = f"[WARNING] No output captured from scraper process.\n"
+            stdout_text += f"Process return code: {return_code}\n"
+            stdout_text += f"Python executable: {sys.executable}\n"
+            stdout_text += f"Working directory: {os.getcwd()}\n"
+            stdout_text += "\nPossible issues:\n"
+            stdout_text += "- The process may have failed silently\n"
+            stdout_text += "- Output buffering may be preventing log capture\n"
+            stdout_text += "- Check Railway deployment logs for more details\n"
+        
         # Since we redirected stderr to stdout, stderr will be empty
         return return_code, stdout_text, ""
         
+    except FileNotFoundError:
+        error_msg = f"Python executable not found: {sys.executable}"
+        return 1, f"[ERROR] {error_msg}", ""
     except Exception as e:
         error_msg = f"Failed to run scraper: {str(e)}"
         import traceback
         traceback_str = traceback.format_exc()
-        return 1, f"Error details:\n{traceback_str}", error_msg
+        return 1, f"[ERROR] {error_msg}\n\nTraceback:\n{traceback_str}", ""
 
 
 def render_chat_page():
@@ -184,17 +204,25 @@ def render_chat_page():
 
     # Optional: trigger scraper from the UI
     if run_scraper_clicked:
-        with st.spinner(f"Running scraper for up to {scraper_max_targets} firm(s)..."):
-            code, out, err = run_scraper_from_ui(scraper_max_targets)
+        # Create a placeholder for status
+        status_placeholder = st.empty()
+        logs_placeholder = st.empty()
+        
+        status_placeholder.info(f"🔄 Starting scraper for up to {scraper_max_targets} firm(s)...")
+        
+        code, out, err = run_scraper_from_ui(scraper_max_targets)
 
         # Show status prominently
         if code == 0:
-            st.success(f"✅ Scraper completed successfully! (Exit code: {code})")
+            status_placeholder.success(f"✅ Scraper completed successfully! (Exit code: {code})")
+        elif code == -1:
+            status_placeholder.error(f"⏱️ Scraper timed out after 10 minutes (Exit code: {code})")
         else:
-            st.error(f"❌ Scraper finished with errors (Exit code: {code})")
+            status_placeholder.error(f"❌ Scraper finished with errors (Exit code: {code})")
         
         # Display logs in a prominent, scrollable area
-        st.markdown("### 📋 Scraper Logs")
+        with logs_placeholder.container():
+            st.markdown("### 📋 Scraper Logs")
         
         # Combine all output (stderr is redirected to stdout, so err should be empty)
         all_output = []
