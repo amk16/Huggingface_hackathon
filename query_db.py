@@ -7,17 +7,20 @@ from dotenv import load_dotenv
 from src.database import VectorDB
 
 
-def ensure_chroma_key():
-    """Chroma's OpenAI embedding helper expects CHROMA_OPENAI_API_KEY."""
-    if os.getenv("CHROMA_OPENAI_API_KEY"):
-        return
+def ensure_required_keys():
+    """Ensure required API keys are set."""
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
         raise RuntimeError(
-            "Neither CHROMA_OPENAI_API_KEY nor OPENAI_API_KEY is set. "
-            "Export one of them before running this command."
+            "OPENAI_API_KEY is required. "
+            "Export it before running this command."
         )
-    os.environ["CHROMA_OPENAI_API_KEY"] = openai_key
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+    if not pinecone_key:
+        raise RuntimeError(
+            "PINECONE_API_KEY is required. "
+            "Get your API key from https://app.pinecone.io/ and export it."
+        )
 
 
 def pretty_print_documents(documents, metadatas):
@@ -93,7 +96,7 @@ def main():
     args = parser.parse_args()
 
     load_dotenv(args.env_file)
-    ensure_chroma_key()
+    ensure_required_keys()
 
     db = VectorDB()
 

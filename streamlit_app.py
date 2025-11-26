@@ -27,10 +27,14 @@ def ensure_required_keys():
         raise RuntimeError(
             "OPENAI_API_KEY is missing. Add it to your environment or .env file."
         )
-
-    if not os.getenv("CHROMA_OPENAI_API_KEY"):
-        logger.debug("Setting CHROMA_OPENAI_API_KEY from OPENAI_API_KEY")
-        os.environ["CHROMA_OPENAI_API_KEY"] = openai_key
+    
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+    if not pinecone_key:
+        logger.error("PINECONE_API_KEY is missing from environment")
+        raise RuntimeError(
+            "PINECONE_API_KEY is missing. Get your API key from https://app.pinecone.io/ "
+            "and add it to your environment or .env file."
+        )
 
 
 @st.cache_resource

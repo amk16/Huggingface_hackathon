@@ -2,8 +2,8 @@
 
 ### 1. Repo structure
 
-- `main.py`: batch scraper that populates the Chroma DB using Playwright + OpenAI.
-- `streamlit_app.py`: Streamlit UI that queries the Chroma DB (RAG chat).
+- `main.py`: batch scraper that populates the Pinecone vector database using Playwright + OpenAI.
+- `streamlit_app.py`: Streamlit UI that queries the Pinecone database (RAG chat).
 - `requirements.txt`: Python dependencies.
 - `Dockerfile`: Container image for Railway (includes Playwright browsers).
 - `Procfile`: Declares a `web` process (Streamlit) and a `worker` process (`python main.py`).
@@ -12,12 +12,12 @@
 
 Create these in Railway project settings:
 
-- `OPENAI_API_KEY` (required)
+- `OPENAI_API_KEY` (required) - Get from https://platform.openai.com/api-keys
+- `PINECONE_API_KEY` (required) - Get from https://app.pinecone.io/
 - Optional:
+  - `PINECONE_INDEX_NAME` - Defaults to "london-law-firms" if not set
   - `LANGCHAIN_API_KEY`
   - `LANGCHAIN_TRACING_V2=true`
-
-`streamlit_app.py` will automatically mirror `OPENAI_API_KEY` into `CHROMA_OPENAI_API_KEY` if that variable is missing.
 
 ### 3. Deploying with Docker (recommended)
 
@@ -52,13 +52,35 @@ Because scraping 100+ firms is slow and uses tokens, you’ll typically:
 
 ### 5. Data persistence
 
-The Chroma DB files live under `chroma_db/` in the container filesystem.
+The vector database is now stored in **Pinecone** (cloud-hosted), so data persists automatically across deploys and container rebuilds. No volume configuration is needed.
 
-For durable storage across deploys, configure:
+**Setting up Pinecone:**
 
-- A Railway volume mounted at `/app/chroma_db`, or
-- A remote vector store instead of local Chroma (future enhancement).
+1. Sign up for a free account at https://app.pinecone.io/
+2. Install the Pinecone CLI (if not already installed):
+   ```bash
+   # macOS
+   brew tap pinecone-io/tap && brew install pinecone-io/tap/pinecone
+   
+   # Other platforms: Download from https://github.com/pinecone-io/cli/releases
+   ```
+3. Authenticate with Pinecone:
+   ```bash
+   pc login
+   # Or set API key: export PINECONE_API_KEY="your-api-key"
+   ```
+4. Create the index using the CLI:
+   ```bash
+   pc index create --name london-law-firms --dimension 1536 --metric cosine \
+     --cloud aws --region us-east-1
+   ```
+   - Name: `london-law-firms` (or set `PINECONE_INDEX_NAME` env var)
+   - Dimension: `1536` (for text-embedding-3-small)
+   - Metric: `cosine`
+   - Cloud: `aws` (or `gcp`, `azure`)
+   - Region: `us-east-1` (choose based on your location)
+5. Copy your API key and add it as `PINECONE_API_KEY` in Railway
 
-If you don’t attach a volume, data will be tied to the current container image and can be lost on rebuilds.
+**Note:** Index creation must be done via CLI before running the scraper. The app will check if the index exists and raise an error if it doesn't.
 
 

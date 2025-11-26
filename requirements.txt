@@ -2,7 +2,8 @@ playwright
 beautifulsoup4
 langchain
 langchain-openai
-chromadb
+pinecone
+openai
 pandas
 python-dotenv
 pydantic
