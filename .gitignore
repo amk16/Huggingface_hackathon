@@ -1,0 +1,19 @@
+# Python virtual environments
+.venv/
+env/
+venv/
+
+# Python environment files
+.env
+.env.*
+
+# Node.js dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
