@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import logging
 from textwrap import dedent
 
 import streamlit as st
@@ -9,30 +10,44 @@ from langchain_openai import ChatOpenAI
 
 from src.database import VectorDB
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger("streamlit_app")
+
 
 def ensure_required_keys():
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
+        logger.error("OPENAI_API_KEY is missing from environment")
         raise RuntimeError(
             "OPENAI_API_KEY is missing. Add it to your environment or .env file."
         )
 
     if not os.getenv("CHROMA_OPENAI_API_KEY"):
+        logger.debug("Setting CHROMA_OPENAI_API_KEY from OPENAI_API_KEY")
         os.environ["CHROMA_OPENAI_API_KEY"] = openai_key
 
 
 @st.cache_resource
 def get_vector_db():
     ensure_required_keys()
+    logger.info("Initializing VectorDB")
     return VectorDB()
 
 
 @st.cache_resource
 def get_llm(model_name: str):
+    logger.info(f"Initializing LLM with model: {model_name}")
     return ChatOpenAI(model=model_name, temperature=0)
 
 
 def retrieve_context(db: VectorDB, question: str, top_k: int):
+    logger.debug(f"Retrieving context for question: {question[:50]}... (top_k={top_k})")
     response = db.collection.query(
         query_texts=[question],
         n_results=top_k,
@@ -42,8 +57,10 @@ def retrieve_context(db: VectorDB, question: str, top_k: int):
     documents = response.get("documents", [[]])[0]
     metadatas = response.get("metadatas", [[]])[0]
     if not documents:
+        logger.warning(f"No documents found for query: {question[:50]}...")
         return ""
 
+    logger.info(f"Retrieved {len(documents)} document(s) for query")
     snippets = []
     for idx, (doc, meta) in enumerate(zip(documents, metadatas), start=1):
         snippet = dedent(
@@ -63,6 +80,7 @@ def retrieve_context(db: VectorDB, question: str, top_k: int):
 
 
 def answer_question(llm: ChatOpenAI, context: str, question: str, history: list):
+    logger.debug(f"Answering question: {question[:50]}... (history length: {len(history)})")
     system_instruction = dedent(
         """
         You are a concise assistant that answers questions about London law firms
@@ -89,13 +107,18 @@ def answer_question(llm: ChatOpenAI, context: str, question: str, history: list)
         """
     ).strip()
 
-    response = llm.invoke(
-        [
-            ("system", system_instruction),
-            ("human", composed_prompt),
-        ]
-    )
-    return response.content.strip()
+    try:
+        response = llm.invoke(
+            [
+                ("system", system_instruction),
+                ("human", composed_prompt),
+            ]
+        )
+        logger.info(f"Successfully generated answer for question: {question[:50]}...")
+        return response.content.strip()
+    except Exception as e:
+        logger.error(f"Error generating answer: {str(e)}", exc_info=True)
+        raise
 
 
 def init_session_state():
@@ -111,6 +134,7 @@ def render_sidebar():
     load_env_clicked = st.sidebar.button("Reload Env", type="primary")
 
     if load_env_clicked:
+        logger.info(f"Reloading environment from {env_file}")
         load_dotenv(env_file)
         st.sidebar.success(f"Environment reloaded from {env_file}")
 
@@ -134,6 +158,9 @@ def render_sidebar():
 
 def run_scraper_from_ui(max_targets: int):
     """Invoke the scraper (main.py) as a subprocess and capture logs."""
+    import threading
+    
+    logger.info(f"Starting scraper subprocess with max_targets={max_targets}")
     env = os.environ.copy()
     env["MAX_TARGETS"] = str(max_targets)
     # Ensure unbuffered output for real-time logs
@@ -141,34 +168,63 @@ def run_scraper_from_ui(max_targets: int):
     # Force Python to not buffer stdout/stderr
     env["PYTHONIOENCODING"] = "utf-8"
 
-    # Use Popen and combine stderr into stdout to capture all logs
-    # Python logging goes to stderr by default, so we merge them
     try:
+        # Get the absolute path to main.py
+        main_py_path = os.path.join(os.getcwd(), "main.py")
+        if not os.path.exists(main_py_path):
+            logger.error(f"main.py not found at: {main_py_path}")
+            return 1, f"[ERROR] main.py not found at: {main_py_path}", ""
+        
+        logger.debug(f"Executing: {sys.executable} -u {main_py_path}")
+        
+        # Use Popen with PIPE to capture output and stream it to terminal
         process = subprocess.Popen(
-            [sys.executable, "-u", "main.py"],  # Use sys.executable for better compatibility
+            [sys.executable, "-u", main_py_path],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Redirect stderr to stdout to capture all logs
+            stderr=subprocess.STDOUT,  # Redirect stderr to stdout
             text=True,
-            bufsize=1,  # Line buffered
             env=env,
-            universal_newlines=True,
+            cwd=os.getcwd(),  # Ensure we're in the right directory
+            bufsize=1,  # Line buffered
         )
         
-        # Use communicate() with timeout to get all output
-        try:
-            stdout_output, _ = process.communicate(timeout=600)  # 10 minute timeout
-            return_code = process.returncode
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout_output, _ = process.communicate()
-            return_code = -1
-            stdout_output = (stdout_output or "") + "\n[ERROR] Process timed out after 10 minutes"
+        # Collect output lines for Streamlit display
+        output_lines = []
         
-        # Clean up the output
-        stdout_text = stdout_output.strip() if stdout_output else ""
+        def read_output():
+            """Read output from subprocess and stream to terminal while collecting."""
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    line = line.rstrip()
+                    output_lines.append(line)
+                    # Stream to terminal in real-time
+                    print(line, flush=True)
+            process.stdout.close()
+        
+        # Start reading output in a separate thread
+        output_thread = threading.Thread(target=read_output, daemon=True)
+        output_thread.start()
+        
+        # Wait for process with timeout
+        try:
+            logger.debug("Waiting for scraper process to complete (timeout: 600s)")
+            return_code = process.wait(timeout=600)  # 10 minute timeout
+            logger.info(f"Scraper process completed with return code: {return_code}")
+        except subprocess.TimeoutExpired:
+            logger.warning("Scraper process timed out after 10 minutes")
+            process.kill()
+            process.wait()
+            return_code = -1
+        
+        # Wait for output thread to finish reading
+        output_thread.join(timeout=2)
+        
+        # Combine all output lines
+        stdout_text = "\n".join(output_lines)
         
         # If we got no output, add diagnostic information
-        if not stdout_text:
+        if not stdout_text or stdout_text.strip() == "":
+            logger.warning("No output captured from scraper process")
             stdout_text = f"[WARNING] No output captured from scraper process.\n"
             stdout_text += f"Process return code: {return_code}\n"
             stdout_text += f"Python executable: {sys.executable}\n"
@@ -178,14 +234,15 @@ def run_scraper_from_ui(max_targets: int):
             stdout_text += "- Output buffering may be preventing log capture\n"
             stdout_text += "- Check Railway deployment logs for more details\n"
         
-        # Since we redirected stderr to stdout, stderr will be empty
-        return return_code, stdout_text, ""
+        return return_code, stdout_text.strip(), ""
         
     except FileNotFoundError:
         error_msg = f"Python executable not found: {sys.executable}"
+        logger.error(error_msg)
         return 1, f"[ERROR] {error_msg}", ""
     except Exception as e:
         error_msg = f"Failed to run scraper: {str(e)}"
+        logger.error(error_msg, exc_info=True)
         import traceback
         traceback_str = traceback.format_exc()
         return 1, f"[ERROR] {error_msg}\n\nTraceback:\n{traceback_str}", ""
@@ -204,6 +261,7 @@ def render_chat_page():
 
     # Optional: trigger scraper from the UI
     if run_scraper_clicked:
+        logger.info(f"User triggered scraper run with max_targets={scraper_max_targets}")
         # Create a placeholder for status
         status_placeholder = st.empty()
         logs_placeholder = st.empty()
@@ -214,10 +272,13 @@ def render_chat_page():
 
         # Show status prominently
         if code == 0:
+            logger.info("Scraper completed successfully")
             status_placeholder.success(f"✅ Scraper completed successfully! (Exit code: {code})")
         elif code == -1:
+            logger.warning("Scraper timed out after 10 minutes")
             status_placeholder.error(f"⏱️ Scraper timed out after 10 minutes (Exit code: {code})")
         else:
+            logger.error(f"Scraper finished with errors (exit code: {code})")
             status_placeholder.error(f"❌ Scraper finished with errors (Exit code: {code})")
         
         # Display logs in a prominent, scrollable area
@@ -277,6 +338,7 @@ def render_chat_page():
 
     prompt = st.chat_input("Ask about a law firm...")
     if prompt:
+        logger.info(f"User question received: {prompt[:100]}...")
         with st.chat_message("user"):
             st.write(prompt)
 
@@ -289,6 +351,7 @@ def render_chat_page():
 
         st.session_state.history.append({"user": prompt, "assistant": answer})
         st.session_state.last_context = context
+        logger.debug(f"Added question to history (total messages: {len(st.session_state.history)})")
 
     if show_context and st.session_state.last_context:
         with st.expander("Most recent retrieved context"):
@@ -307,13 +370,16 @@ def render_database_view():
 
     # Get all entries from the database
     with st.spinner("Loading database entries..."):
-        results = db.collection.get(include=["metadatas", "documents", "ids"])
+        logger.info("Loading database entries for view")
+        results = db.collection.get(include=["metadatas", "documents"])
         
         if not results.get("ids"):
+            logger.info("No entries found in the database")
             st.info("No entries found in the database.")
             return
 
         entries_count = len(results["ids"])
+        logger.info(f"Found {entries_count} entry/entries in the database")
         st.success(f"Found {entries_count} entry/entries in the database.")
         
         # Add a search/filter option
