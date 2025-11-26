@@ -63,10 +63,16 @@ class LawFirmScraper:
                 candidate_links = (
                     discovered_links | sitemap_links | static_links | extra_links
                 )
+                
+                # Limit to maximum 5 links per URL
+                total_candidates = len(candidate_links)
+                candidate_links = list(candidate_links)[:5]
+                
                 logger.info(
-                    "Found %d candidate section links for %s (DOM=%d, sitemap=%d, static=%d, extra=%d)",
-                    len(candidate_links),
+                    "Found %d candidate section links for %s, processing %d (max 5). Discovery breakdown: DOM=%d, sitemap=%d, static=%d, extra=%d",
+                    total_candidates,
                     base_url,
+                    len(candidate_links),
                     len(discovered_links),
                     len(sitemap_links),
                     len(static_links),

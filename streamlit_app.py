@@ -160,13 +160,16 @@ def render_sidebar():
     return top_k, model_name, show_context, run_scraper_clicked, int(scraper_max_targets)
 
 
-def run_scraper_from_ui(max_targets: int):
-    """Invoke the scraper (main.py) as a subprocess and capture logs."""
+def run_single_scraper_run(max_targets: int, run_number: int = 1, all_output: list = None):
+    """Run a single scraper execution and return results."""
     import threading
     
-    logger.info(f"Starting scraper subprocess with max_targets={max_targets}")
+    if all_output is None:
+        all_output = []
+    
+    logger.info(f"[Run {run_number}] Starting scraper subprocess with max_targets={max_targets}")
     env = os.environ.copy()
-    env["MAX_TARGETS"] = str(max_targets)
+    env["MAX_TARGETS"] = str(max_targets) if max_targets else ""
     # Ensure unbuffered output for real-time logs
     env["PYTHONUNBUFFERED"] = "1"
     # Force Python to not buffer stdout/stderr
@@ -177,9 +180,9 @@ def run_scraper_from_ui(max_targets: int):
         main_py_path = os.path.join(os.getcwd(), "main.py")
         if not os.path.exists(main_py_path):
             logger.error(f"main.py not found at: {main_py_path}")
-            return 1, f"[ERROR] main.py not found at: {main_py_path}", ""
+            return 1, f"[ERROR] main.py not found at: {main_py_path}", False
         
-        logger.debug(f"Executing: {sys.executable} -u {main_py_path}")
+        logger.debug(f"[Run {run_number}] Executing: {sys.executable} -u {main_py_path}")
         
         # Use Popen with PIPE to capture output and stream it to terminal
         process = subprocess.Popen(
@@ -194,6 +197,9 @@ def run_scraper_from_ui(max_targets: int):
         
         # Collect output lines for Streamlit display
         output_lines = []
+        all_output.append(f"\n{'='*60}")
+        all_output.append(f"[Run {run_number}] SCRAPER STARTED")
+        all_output.append(f"{'='*60}")
         
         def read_output():
             """Read output from subprocess and stream to terminal while collecting."""
@@ -201,6 +207,7 @@ def run_scraper_from_ui(max_targets: int):
                 if line:
                     line = line.rstrip()
                     output_lines.append(line)
+                    all_output.append(line)
                     # Stream to terminal in real-time
                     print(line, flush=True)
             process.stdout.close()
@@ -209,13 +216,15 @@ def run_scraper_from_ui(max_targets: int):
         output_thread = threading.Thread(target=read_output, daemon=True)
         output_thread.start()
         
-        # Wait for process with timeout
+        # Wait for process with timeout - 1 hour (3600 seconds)
+        TIMEOUT_SECONDS = 3600
         try:
-            logger.debug("Waiting for scraper process to complete (timeout: 600s)")
-            return_code = process.wait(timeout=600)  # 10 minute timeout
-            logger.info(f"Scraper process completed with return code: {return_code}")
+            logger.debug(f"[Run {run_number}] Waiting for scraper process to complete (timeout: {TIMEOUT_SECONDS}s)")
+            return_code = process.wait(timeout=TIMEOUT_SECONDS)
+            logger.info(f"[Run {run_number}] Scraper process completed with return code: {return_code}")
         except subprocess.TimeoutExpired:
-            logger.warning("Scraper process timed out after 10 minutes")
+            logger.warning(f"[Run {run_number}] Scraper process timed out after {TIMEOUT_SECONDS} seconds (1 hour)")
+            all_output.append(f"\n[TIMEOUT] Run {run_number} timed out after {TIMEOUT_SECONDS} seconds")
             process.kill()
             process.wait()
             return_code = -1
@@ -225,31 +234,119 @@ def run_scraper_from_ui(max_targets: int):
         
         # Combine all output lines
         stdout_text = "\n".join(output_lines)
+        all_output.append(f"[Run {run_number}] COMPLETED with return code: {return_code}")
         
-        # If we got no output, add diagnostic information
-        if not stdout_text or stdout_text.strip() == "":
-            logger.warning("No output captured from scraper process")
-            stdout_text = f"[WARNING] No output captured from scraper process.\n"
-            stdout_text += f"Process return code: {return_code}\n"
-            stdout_text += f"Python executable: {sys.executable}\n"
-            stdout_text += f"Working directory: {os.getcwd()}\n"
-            stdout_text += "\nPossible issues:\n"
-            stdout_text += "- The process may have failed silently\n"
-            stdout_text += "- Output buffering may be preventing log capture\n"
-            stdout_text += "- Check Railway deployment logs for more details\n"
+        # Check if there are remaining URLs by checking progress file
+        progress_file = "scraper_progress.json"
+        has_remaining = False
+        if os.path.exists(progress_file):
+            import json
+            try:
+                with open(progress_file, 'r') as f:
+                    progress = json.load(f)
+                    all_urls = set(progress.get("all_urls", []))
+                    processed = set(progress.get("processed", []))
+                    remaining = all_urls - processed
+                    if remaining:
+                        has_remaining = True
+                        logger.info(f"[Run {run_number}] Found {len(remaining)} remaining URLs after timeout")
+                        all_output.append(f"[Run {run_number}] Remaining URLs: {len(remaining)}")
+            except Exception as e:
+                logger.warning(f"Could not check progress file: {e}")
         
-        return return_code, stdout_text.strip(), ""
+        return return_code, stdout_text.strip(), has_remaining
         
     except FileNotFoundError:
         error_msg = f"Python executable not found: {sys.executable}"
         logger.error(error_msg)
-        return 1, f"[ERROR] {error_msg}", ""
+        return 1, f"[ERROR] {error_msg}", False
     except Exception as e:
         error_msg = f"Failed to run scraper: {str(e)}"
         logger.error(error_msg, exc_info=True)
         import traceback
         traceback_str = traceback.format_exc()
-        return 1, f"[ERROR] {error_msg}\n\nTraceback:\n{traceback_str}", ""
+        return 1, f"[ERROR] {error_msg}\n\nTraceback:\n{traceback_str}", False
+
+
+def run_scraper_from_ui(max_targets: int):
+    """Invoke the scraper with automatic restart on timeout until all URLs are processed."""
+    all_output = []
+    run_number = 1
+    max_runs = 100  # Safety limit to prevent infinite loops
+    
+    logger.info(f"Starting scraper with automatic restart (max_runs={max_runs})")
+    all_output.append(f"Starting scraper with automatic restart capability")
+    all_output.append(f"Timeout per run: 1 hour (3600 seconds)")
+    all_output.append(f"Max runs: {max_runs}")
+    
+    while run_number <= max_runs:
+        return_code, stdout_text, has_remaining = run_single_scraper_run(max_targets, run_number, all_output)
+        
+        # Check if we should continue
+        if return_code == 0:
+            # Normal completion - check if there are remaining URLs
+            progress_file = "scraper_progress.json"
+            if os.path.exists(progress_file):
+                import json
+                try:
+                    with open(progress_file, 'r') as f:
+                        progress = json.load(f)
+                        all_urls = set(progress.get("all_urls", []))
+                        processed = set(progress.get("processed", []))
+                        remaining = all_urls - processed
+                        if remaining:
+                            logger.info(f"Run {run_number} completed but {len(remaining)} URLs remain. Starting next run.")
+                            all_output.append(f"\n[INFO] Run {run_number} completed successfully but {len(remaining)} URLs remain.")
+                            all_output.append(f"[INFO] Starting run {run_number + 1}...")
+                            run_number += 1
+                            continue
+                        else:
+                            # All done!
+                            logger.info(f"All URLs processed in {run_number} run(s)")
+                            all_output.append(f"\n[SUCCESS] All URLs processed in {run_number} run(s)!")
+                            break
+                except Exception as e:
+                    logger.warning(f"Could not check progress: {e}. Assuming complete.")
+                    break
+            else:
+                # No progress file means done
+                logger.info(f"Run {run_number} completed. No progress file found. Assuming complete.")
+                break
+        elif return_code == -1:
+            # Timeout occurred - check if there are remaining URLs
+            if has_remaining:
+                logger.info(f"Run {run_number} timed out. Remaining URLs detected. Starting next run.")
+                all_output.append(f"\n[INFO] Run {run_number} timed out after 1 hour.")
+                all_output.append(f"[INFO] Data has been saved to Pinecone. Starting run {run_number + 1}...")
+                run_number += 1
+                continue
+            else:
+                # Timeout but no remaining URLs (shouldn't happen but handle it)
+                logger.warning(f"Run {run_number} timed out but no remaining URLs found. Stopping.")
+                all_output.append(f"\n[WARNING] Run {run_number} timed out but no remaining URLs found.")
+                break
+        else:
+            # Error occurred
+            logger.error(f"Run {run_number} failed with return code {return_code}")
+            all_output.append(f"\n[ERROR] Run {run_number} failed with return code {return_code}")
+            break
+    
+    if run_number > max_runs:
+        logger.warning(f"Reached maximum number of runs ({max_runs}). Stopping.")
+        all_output.append(f"\n[WARNING] Reached maximum number of runs ({max_runs}). Stopping.")
+    
+    # Combine all output
+    full_output = "\n".join(all_output)
+    
+    # Get final status
+    if return_code == 0:
+        final_code = 0
+    elif return_code == -1:
+        final_code = -1
+    else:
+        final_code = return_code
+    
+    return final_code, full_output, ""
 
 
 def render_chat_page():
@@ -279,8 +376,8 @@ def render_chat_page():
             logger.info("Scraper completed successfully")
             status_placeholder.success(f"✅ Scraper completed successfully! (Exit code: {code})")
         elif code == -1:
-            logger.warning("Scraper timed out after 10 minutes")
-            status_placeholder.error(f"⏱️ Scraper timed out after 10 minutes (Exit code: {code})")
+            logger.warning("Scraper timed out after 1 hour")
+            status_placeholder.warning(f"⏱️ Scraper timed out after 1 hour (normal behavior - data saved, will auto-restart)")
         else:
             logger.error(f"Scraper finished with errors (exit code: {code})")
             status_placeholder.error(f"❌ Scraper finished with errors (Exit code: {code})")

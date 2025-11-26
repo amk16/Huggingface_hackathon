@@ -17,3 +17,7 @@ node_modules/
 __pycache__/
 *.py[cod]
 *.pyo
+
+# Scraper progress tracking files
+scraper_progress.json
+scraper_progress_completed.json
