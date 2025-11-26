@@ -135,10 +135,12 @@ def run_scraper_from_ui(max_targets: int):
     """Invoke the scraper (main.py) as a subprocess and capture logs."""
     env = os.environ.copy()
     env["MAX_TARGETS"] = str(max_targets)
+    # Ensure unbuffered output for real-time logs
+    env["PYTHONUNBUFFERED"] = "1"
 
     # Railway / Docker image has `python` on PATH
     completed = subprocess.run(
-        ["python", "main.py"],
+        ["python", "-u", "main.py"],  # -u flag for unbuffered output
         capture_output=True,
         text=True,
         env=env,
@@ -146,8 +148,7 @@ def run_scraper_from_ui(max_targets: int):
     return completed.returncode, completed.stdout, completed.stderr
 
 
-def main():
-    st.set_page_config(page_title="Law Firm RAG Chat", layout="wide")
+def render_chat_page():
     st.title("London Law Firm RAG Chat")
     st.caption("Ask natural-language questions grounded in your scraped RAG store.")
 
@@ -163,12 +164,40 @@ def main():
         with st.spinner(f"Running scraper for up to {scraper_max_targets} firm(s)..."):
             code, out, err = run_scraper_from_ui(scraper_max_targets)
 
-        st.sidebar.write(f"Scraper finished with exit code {code}")
-        with st.expander("Scraper logs"):
-            if out:
-                st.text(out[-8000:])  # show last part of stdout
-            if err:
-                st.text(err[-4000:])
+        # Show status prominently
+        if code == 0:
+            st.success(f"✅ Scraper completed successfully! (Exit code: {code})")
+        else:
+            st.error(f"❌ Scraper finished with errors (Exit code: {code})")
+        
+        # Display logs in a prominent, scrollable area
+        st.markdown("### 📋 Scraper Logs")
+        
+        # Combine stdout and stderr for better visibility
+        all_output = []
+        if out:
+            all_output.append("=== STDOUT ===")
+            all_output.append(out)
+        if err:
+            all_output.append("\n=== STDERR ===")
+            all_output.append(err)
+        
+        if all_output:
+            full_log = "\n".join(all_output)
+            # Use st.code for better formatting and copy capability
+            st.code(full_log, language="text")
+            
+            # Also show in expandable section for detailed view
+            with st.expander("📊 Detailed Logs (scrollable)", expanded=True):
+                st.text_area(
+                    "Full scraper output",
+                    value=full_log,
+                    height=400,
+                    disabled=True,
+                    label_visibility="collapsed"
+                )
+        else:
+            st.warning("No output captured from scraper.")
 
     db = get_vector_db()
     llm = get_llm(model_name)
@@ -197,6 +226,79 @@ def main():
     if show_context and st.session_state.last_context:
         with st.expander("Most recent retrieved context"):
             st.markdown(st.session_state.last_context)
+
+
+def render_database_view():
+    st.title("Database Entries")
+    st.caption("View all law firm entries stored in the database.")
+
+    # Load env on first run
+    load_dotenv(".env")
+    ensure_required_keys()
+
+    db = get_vector_db()
+
+    # Get all entries from the database
+    with st.spinner("Loading database entries..."):
+        results = db.collection.get(include=["metadatas", "documents", "ids"])
+        
+        if not results.get("ids"):
+            st.info("No entries found in the database.")
+            return
+
+        entries_count = len(results["ids"])
+        st.success(f"Found {entries_count} entry/entries in the database.")
+        
+        # Add a search/filter option
+        search_term = st.text_input("🔍 Search by firm name", placeholder="Type to filter entries...")
+        
+        # Display entries
+        documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        ids = results.get("ids", [])
+        
+        # Filter entries if search term is provided
+        filtered_entries = []
+        for idx, (doc, meta, entry_id) in enumerate(zip(documents, metadatas, ids)):
+            firm_name = meta.get('name', 'Unknown Firm')
+            if not search_term or search_term.lower() in firm_name.lower():
+                filtered_entries.append((idx, doc, meta, entry_id))
+        
+        if not filtered_entries:
+            st.warning(f"No entries found matching '{search_term}'.")
+            return
+        
+        st.write(f"Showing {len(filtered_entries)} of {entries_count} entries.")
+        
+        # Display each entry in an expandable container
+        for idx, doc, meta, entry_id in filtered_entries:
+            firm_name = meta.get('name', 'Unknown Firm')
+            with st.expander(f"🏛️ **{firm_name}**", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown(f"**Tone:** {meta.get('tone', 'n/a')}")
+                    st.markdown(f"**Keywords:** {meta.get('keywords', 'n/a')}")
+                
+                with col2:
+                    st.markdown(f"**Recent Wins:** {meta.get('wins', 'n/a')}")
+                    st.markdown(f"**Motto:** {meta.get('motto', 'n/a')}")
+                
+                st.markdown("---")
+                st.markdown("**Full Content:**")
+                st.markdown(doc.strip() if doc else "No content available.")
+
+
+def main():
+    st.set_page_config(page_title="Law Firm RAG Chat", layout="wide")
+    
+    # Create navigation with two pages
+    page = st.navigation([
+        st.Page(render_chat_page, title="Chat", icon="💬"),
+        st.Page(render_database_view, title="Database View", icon="📊"),
+    ])
+    
+    page.run()
 
 
 if __name__ == "__main__":
