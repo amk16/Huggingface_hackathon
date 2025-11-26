@@ -1,0 +1,10 @@
+playwright
+beautifulsoup4
+langchain
+langchain-openai
+chromadb
+pandas
+python-dotenv
+pydantic
+html2text
+streamlit
