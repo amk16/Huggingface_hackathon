@@ -37,4 +37,4 @@ class VectorDB:
             }],
             ids=[firm_data['firm_name'].replace(" ", "_").lower()]
         )
-        print(f"Saved {firm_data['firm_name']} to RAG Database.")
+        print(f"Saved {firm_data['firm_name']} to RAG Database.", flush=True)

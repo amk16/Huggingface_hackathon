@@ -9,9 +9,13 @@ from src.database import VectorDB
 
 
 # Configure logging early so every module shares it
+# Force logging to stdout for better capture in subprocess
+import sys
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    stream=sys.stdout,  # Explicitly output to stdout
+    force=True,  # Override any existing configuration
 )
 logger = logging.getLogger("law_firm_rag")
 

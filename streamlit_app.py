@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from textwrap import dedent
 
 import streamlit as st
@@ -137,15 +138,37 @@ def run_scraper_from_ui(max_targets: int):
     env["MAX_TARGETS"] = str(max_targets)
     # Ensure unbuffered output for real-time logs
     env["PYTHONUNBUFFERED"] = "1"
+    # Force Python to not buffer stdout/stderr
+    env["PYTHONIOENCODING"] = "utf-8"
 
-    # Railway / Docker image has `python` on PATH
-    completed = subprocess.run(
-        ["python", "-u", "main.py"],  # -u flag for unbuffered output
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    return completed.returncode, completed.stdout, completed.stderr
+    # Use Popen and combine stderr into stdout to capture all logs
+    # Python logging goes to stderr by default, so we merge them
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-u", "main.py"],  # Use sys.executable for better compatibility
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Redirect stderr to stdout to capture all logs
+            text=True,
+            bufsize=0,  # Unbuffered
+            env=env,
+            universal_newlines=True,
+        )
+        
+        # Use communicate() to get all output - this is more reliable
+        stdout_output, _ = process.communicate()
+        return_code = process.returncode
+        
+        # Clean up the output
+        stdout_text = stdout_output.strip() if stdout_output else ""
+        
+        # Since we redirected stderr to stdout, stderr will be empty
+        return return_code, stdout_text, ""
+        
+    except Exception as e:
+        error_msg = f"Failed to run scraper: {str(e)}"
+        import traceback
+        traceback_str = traceback.format_exc()
+        return 1, f"Error details:\n{traceback_str}", error_msg
 
 
 def render_chat_page():
@@ -173,17 +196,22 @@ def render_chat_page():
         # Display logs in a prominent, scrollable area
         st.markdown("### 📋 Scraper Logs")
         
-        # Combine stdout and stderr for better visibility
+        # Combine all output (stderr is redirected to stdout, so err should be empty)
         all_output = []
         if out:
-            all_output.append("=== STDOUT ===")
             all_output.append(out)
         if err:
-            all_output.append("\n=== STDERR ===")
-            all_output.append(err)
+            all_output.append(f"\n=== Additional Errors ===\n{err}")
         
         if all_output:
             full_log = "\n".join(all_output)
+            
+            # Show summary first
+            if full_log.strip():
+                # Count lines for summary
+                line_count = len(full_log.split('\n'))
+                st.info(f"📊 Captured {line_count} lines of output")
+            
             # Use st.code for better formatting and copy capability
             st.code(full_log, language="text")
             
@@ -197,7 +225,18 @@ def render_chat_page():
                     label_visibility="collapsed"
                 )
         else:
-            st.warning("No output captured from scraper.")
+            st.warning("⚠️ No output captured from scraper. This might indicate:")
+            st.markdown("""
+            - The scraper ran but produced no output
+            - There was an issue capturing the subprocess output
+            - Check Railway logs for more details
+            """)
+            
+            # Show debug info
+            with st.expander("🔍 Debug Information"):
+                st.write(f"Exit code: {code}")
+                st.write(f"Output length: {len(out) if out else 0} characters")
+                st.write(f"Error length: {len(err) if err else 0} characters")
 
     db = get_vector_db()
     llm = get_llm(model_name)
