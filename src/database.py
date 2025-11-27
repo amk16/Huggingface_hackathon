@@ -1,6 +1,9 @@
 import os
+import logging
 from pinecone import Pinecone
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 
 class VectorDB:
@@ -86,6 +89,61 @@ class VectorDB:
             namespace=self.namespace
         )
         print(f"Saved {firm_data['firm_name']} to Pinecone Database.", flush=True)
+    
+    def add_jobs(self, firm_name: str, jobs_data: list):
+        """
+        Store job listings as a metric [keyword/tone] in the vector database.
+        
+        Args:
+            firm_name: Name of the law firm
+            jobs_data: List of job dictionaries with title, company, location, summary, link, platform
+        """
+        if not jobs_data:
+            logger.info(f"No jobs to store for {firm_name}")
+            return
+        
+        # Create a comprehensive text representation of all jobs
+        jobs_text = f"Current Job Openings at {firm_name}:\n\n"
+        for job in jobs_data:
+            jobs_text += f"Title: {job.get('title', 'N/A')}\n"
+            jobs_text += f"Location: {job.get('location', 'N/A')}\n"
+            jobs_text += f"Summary: {job.get('summary', 'N/A')}\n"
+            jobs_text += f"Platform: {job.get('platform', 'N/A')}\n"
+            jobs_text += f"Link: {job.get('link', 'N/A')}\n"
+            jobs_text += "---\n\n"
+        
+        # Generate embedding for the jobs data
+        embedding = self._get_embedding(jobs_text)
+        
+        # Prepare metadata
+        # Store job titles, keywords extracted from job descriptions, and platforms
+        job_titles = [job.get('title', '') for job in jobs_data]
+        platforms = list(set([job.get('platform', '') for job in jobs_data]))
+        
+        metadata = {
+            "name": firm_name,
+            "type": "jobs",  # Mark this as job data
+            "job_count": str(len(jobs_data)),
+            "job_titles": " | ".join(job_titles[:20]),  # Limit to first 20 titles
+            "platforms": ", ".join(platforms),
+            "document": jobs_text,
+            "tone": "hiring",  # Indicate this is hiring-related content
+            "keywords": "jobs, hiring, recruitment, positions, vacancies"  # Standard job-related keywords
+        }
+        
+        # Generate ID for job data (separate from firm data)
+        jobs_id = f"{firm_name.replace(' ', '_').lower()}_jobs"
+        
+        # Upsert to Pinecone
+        self.index.upsert(
+            vectors=[{
+                "id": jobs_id,
+                "values": embedding,
+                "metadata": metadata
+            }],
+            namespace=self.namespace
+        )
+        print(f"Saved {len(jobs_data)} jobs for {firm_name} to Pinecone Database.", flush=True)
 
     @property
     def collection(self):

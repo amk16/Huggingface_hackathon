@@ -47,3 +47,69 @@ class DataProcessor:
         except Exception as e:
             logger.error("LLM Extraction Error: %s", e)
             return None
+    
+    def extract_job_keywords_tone(self, jobs_data: list):
+        """
+        Extract keywords and tone from job listings to add as metric.
+        
+        Args:
+            jobs_data: List of job dictionaries
+            
+        Returns:
+            Dictionary with keywords and tone extracted from job descriptions
+        """
+        if not jobs_data:
+            return None
+        
+        # Combine all job titles and summaries
+        job_text = "\n\n".join([
+            f"Title: {job.get('title', '')}\nSummary: {job.get('summary', '')}"
+            for job in jobs_data[:20]  # Limit to first 20 jobs
+        ])
+        
+        prompt = PromptTemplate(
+            template="""
+            Analyze the following job listings and extract:
+            1. Common keywords/terms that appear across these job postings
+            2. The overall tone/approach to hiring (e.g., "Formal", "Modern", "Aggressive", "Community-focused")
+            3. Key skills or qualifications they're seeking
+            
+            Return a JSON object with:
+            - keywords: List of 5-10 key terms/phrases
+            - tone: One word describing hiring approach
+            - skills: List of 3-5 key skills/qualifications mentioned
+            
+            JOB LISTINGS:
+            {text}
+            """,
+            input_variables=["text"],
+        )
+        
+        try:
+            # Use a simple JSON output parser for this
+            from langchain_core.output_parsers import StrOutputParser
+            chain = prompt | self.llm | StrOutputParser()
+            result = chain.invoke({"text": job_text[:10000]})
+            
+            # Try to parse as JSON
+            import json
+            try:
+                # The LLM might return markdown code blocks, so clean it up
+                if "```json" in result:
+                    result = result.split("```json")[1].split("```")[0].strip()
+                elif "```" in result:
+                    result = result.split("```")[1].split("```")[0].strip()
+                
+                parsed = json.loads(result)
+                return parsed
+            except json.JSONDecodeError:
+                # Fallback: return basic structure
+                logger.warning("Could not parse job keywords as JSON, using fallback")
+                return {
+                    "keywords": ["legal", "law", "lawyer", "solicitor", "legal professional"],
+                    "tone": "Professional",
+                    "skills": ["legal expertise", "communication", "analytical skills"]
+                }
+        except Exception as e:
+            logger.error(f"Error extracting job keywords/tone: {e}")
+            return None
