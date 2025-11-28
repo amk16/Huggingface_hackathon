@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from src.scraper import LawFirmScraper
 from src.processor import DataProcessor
 from src.database import VectorDB
-from src.job_scraper import JobScraper
 from urllib.parse import urlparse
 
 
@@ -88,7 +87,7 @@ def extract_company_name_from_url(url: str) -> str:
     return company_name
 
 
-async def process_firm(scraper, processor, db, job_scraper, url: str, idx: int, total: int, progress):
+async def process_firm(scraper, processor, db, url: str, idx: int, total: int, progress):
     """Process a single firm and save progress after each success."""
     logger.info("(%d/%d) Processing %s", idx, total, url)
     try:
@@ -100,58 +99,57 @@ async def process_firm(scraper, processor, db, job_scraper, url: str, idx: int, 
             return False
 
         structured_data = processor.extract_intelligence(data["raw_text"])
-        if structured_data:
-            firm_name = structured_data.get("firm_name") or extract_company_name_from_url(url)
-            
-            # Save firm data to Pinecone immediately
-            db.add_firm(structured_data)
-            logger.info(
-                "(%d/%d) Saved %s to Pinecone | keywords=%s",
-                idx,
-                total,
-                firm_name,
-                structured_data.get("hiring_keywords"),
-            )
-            
-            # Scrape jobs for this company
-            try:
-                logger.info("(%d/%d) Scraping jobs for %s", idx, total, firm_name)
-                jobs = await job_scraper.scrape_all_platforms(firm_name)
-                
-                if jobs:
-                    # Store jobs in database
-                    db.add_jobs(firm_name, jobs)
-                    logger.info(
-                        "(%d/%d) Found and saved %d jobs for %s",
-                        idx,
-                        total,
-                        len(jobs),
-                        firm_name
-                    )
-                else:
-                    logger.info("(%d/%d) No jobs found for %s", idx, total, firm_name)
-            except Exception as job_error:
-                logger.warning(
-                    "(%d/%d) Error scraping jobs for %s: %s",
-                    idx,
-                    total,
-                    firm_name,
-                    str(job_error)
-                )
-                # Don't fail the entire process if job scraping fails
-            
-            # Mark as processed and save progress
-            if url not in progress["processed"]:
-                progress["processed"].append(url)
-                # Remove from failed if it was there
-                progress["failed"] = [f for f in progress["failed"] if f.get("url") != url]
-                save_progress(progress)
-            return True
-        else:
+        if not structured_data:
             logger.error("(%d/%d) Failed to extract structured data for %s", idx, total, url)
             progress["failed"].append({"url": url, "reason": "extraction_failed"})
             save_progress(progress)
             return False
+
+        firm_name = structured_data.get("firm_name") or extract_company_name_from_url(url)
+        
+        # Save firm data to Pinecone immediately
+        db.add_firm(structured_data)
+        logger.info(
+            "(%d/%d) Saved %s to Pinecone | keywords=%s",
+            idx,
+            total,
+            firm_name,
+            structured_data.get("hiring_keywords"),
+        )
+        
+        # Extract insights from the firm's own career pages instead of job boards
+        try:
+            career_insights = processor.extract_career_insights(
+                data.get("career_sections", []),
+                data.get("raw_text", "")
+            )
+            if career_insights:
+                db.add_career_insights(firm_name, career_insights.model_dump())
+                logger.info(
+                    "(%d/%d) Saved career page insights for %s (openings=%d)",
+                    idx,
+                    total,
+                    firm_name,
+                    len(career_insights.current_openings),
+                )
+            else:
+                logger.info("(%d/%d) No dedicated career insights detected for %s", idx, total, firm_name)
+        except Exception as career_error:
+            logger.warning(
+                "(%d/%d) Error extracting career insights for %s: %s",
+                idx,
+                total,
+                firm_name,
+                str(career_error)
+            )
+        
+        # Mark as processed and save progress
+        if url not in progress["processed"]:
+            progress["processed"].append(url)
+            # Remove from failed if it was there
+            progress["failed"] = [f for f in progress["failed"] if f.get("url") != url]
+            save_progress(progress)
+        return True
     except Exception as e:
         logger.error("(%d/%d) Error processing %s: %s", idx, total, url, str(e))
         progress["failed"].append({"url": url, "reason": str(e)})
@@ -234,7 +232,6 @@ async def main(max_targets: int = None):
     scraper = LawFirmScraper()
     processor = DataProcessor()
     db = VectorDB()
-    job_scraper = JobScraper()
     
     # Process remaining URLs
     for idx, url in enumerate(remaining_urls, start=1):
@@ -252,7 +249,7 @@ async def main(max_targets: int = None):
             return
         
         # Process the URL (saves progress internally)
-        await process_firm(scraper, processor, db, job_scraper, url, processed_count + idx, total_urls, progress)
+        await process_firm(scraper, processor, db, url, processed_count + idx, total_urls, progress)
         
         # Update remaining count
         remaining_count = remaining_count - 1

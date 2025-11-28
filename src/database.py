@@ -145,6 +145,67 @@ class VectorDB:
         )
         print(f"Saved {len(jobs_data)} jobs for {firm_name} to Pinecone Database.", flush=True)
 
+    def add_career_insights(self, firm_name: str, career_data: dict):
+        """
+        Store structured insights cultured from the firm's own career pages.
+        """
+        if not career_data:
+            logger.info(f"No career page insights to store for {firm_name}")
+            return
+
+        openings = career_data.get("current_openings") or []
+        opening_blocks = []
+        for opening in openings:
+            parts = [
+                f"Title: {opening.get('title', 'N/A')}",
+                f"Practice Area: {opening.get('practice_area', '')}",
+                f"Location: {opening.get('location', '')}",
+                f"Experience: {opening.get('experience_level', '')}",
+                f"Deadline: {opening.get('application_deadline', '')}",
+                f"Apply: {opening.get('application_link', '')}",
+                f"Notes: {opening.get('notes', '')}",
+            ]
+            opening_blocks.append("\n".join([p for p in parts if p and not p.endswith(': ')]))
+
+        insights_text = f"""
+        Career Page Snapshot for {firm_name}
+        Hiring focus: {career_data.get('hiring_focus', '')}
+        Application routes: {', '.join(career_data.get('application_channels', []))}
+        Benefits highlighted: {', '.join(career_data.get('benefits', []))}
+        Interview process: {career_data.get('interview_process', '')}
+        Candidate tips: {', '.join(career_data.get('candidate_tips', []))}
+
+        Openings:
+        {chr(10).join(opening_blocks)}
+        """
+
+        embedding = self._get_embedding(insights_text)
+
+        metadata = {
+            "name": firm_name,
+            "type": "career_page",
+            "hiring_focus": career_data.get("hiring_focus", ""),
+            "application_channels": " | ".join(career_data.get("application_channels", [])),
+            "benefits": " | ".join(career_data.get("benefits", [])),
+            "interview_process": career_data.get("interview_process", ""),
+            "candidate_tips": " | ".join(career_data.get("candidate_tips", [])),
+            "openings_count": str(len(openings)),
+            "document": insights_text,
+            "keywords": "career, openings, application guidance"
+        }
+
+        vector_id = f"{firm_name.replace(' ', '_').lower()}_career"
+
+        self.index.upsert(
+            vectors=[{
+                "id": vector_id,
+                "values": embedding,
+                "metadata": metadata
+            }],
+            namespace=self.namespace
+        )
+        print(f"Saved career page insights for {firm_name} to Pinecone Database.", flush=True)
+
     @property
     def collection(self):
         """Compatibility layer to maintain existing interface."""

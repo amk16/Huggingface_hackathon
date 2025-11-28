@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class LawFirmScraper:
-    def __init__(self, section_keywords=None, static_paths=None):
+    def __init__(self, section_keywords=None, static_paths=None, max_section_visits: int = 8):
         self.converter = html2text.HTML2Text()
         self.converter.ignore_links = True
         self.converter.ignore_images = True
@@ -35,6 +35,21 @@ class LawFirmScraper:
             "/insights",
             "/join-us",
         ]
+        self.career_keywords = [
+            "career",
+            "careers",
+            "vacancy",
+            "vacancies",
+            "opportunit",
+            "join-us",
+            "joinus",
+            "graduate",
+            "training-contract",
+            "early-career",
+            "recruitment",
+            "apply",
+        ]
+        self.max_section_visits = max_section_visits
 
     async def get_page_content(self, base_url, additional_paths=None):
         async with async_playwright() as p:
@@ -42,7 +57,7 @@ class LawFirmScraper:
             context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             page = await context.new_page()
 
-            scraped_data = {"url": base_url, "raw_text": ""}
+            scraped_data = {"url": base_url, "raw_text": "", "career_sections": []}
 
             try:
                 # 1. Visit Homepage
@@ -63,16 +78,19 @@ class LawFirmScraper:
                 candidate_links = (
                     discovered_links | sitemap_links | static_links | extra_links
                 )
-                
-                # Limit to maximum 5 links per URL
+
+                candidate_links = self._prioritize_links(candidate_links)
+
+                # Limit total visits to avoid over-scraping
                 total_candidates = len(candidate_links)
-                candidate_links = list(candidate_links)[:5]
+                candidate_links = candidate_links[: self.max_section_visits]
                 
                 logger.info(
-                    "Found %d candidate section links for %s, processing %d (max 5). Discovery breakdown: DOM=%d, sitemap=%d, static=%d, extra=%d",
+                    "Found %d candidate section links for %s, processing %d (max %d). Discovery breakdown: DOM=%d, sitemap=%d, static=%d, extra=%d",
                     total_candidates,
                     base_url,
                     len(candidate_links),
+                    self.max_section_visits,
                     len(discovered_links),
                     len(sitemap_links),
                     len(static_links),
@@ -85,8 +103,17 @@ class LawFirmScraper:
                         await page.goto(link, timeout=10000)
                         content = await page.content()
                         logger.debug("Section content length for %s: %d chars", link, len(content))
+                        section_text = self.clean_html(content)
                         scraped_data["raw_text"] += f"\n--- SOURCE: {link} ---\n"
-                        scraped_data["raw_text"] += self.clean_html(content)
+                        scraped_data["raw_text"] += section_text
+
+                        if self._is_career_link(link) or self._contains_career_signals(section_text):
+                            scraped_data["career_sections"].append(
+                                {
+                                    "url": link,
+                                    "text": section_text,
+                                }
+                            )
                     except Exception as section_error:
                         logger.warning("Skipping %s due to %s", link, section_error)
                         continue
@@ -173,3 +200,22 @@ class LawFirmScraper:
         if base_netloc != absolute_netloc:
             return None
         return absolute.rstrip("/")
+
+    def _is_career_link(self, link: str) -> bool:
+        lower = link.lower()
+        return any(keyword in lower for keyword in self.career_keywords)
+
+    def _contains_career_signals(self, text: str) -> bool:
+        lower = text.lower()
+        return any(keyword in lower for keyword in self.career_keywords)
+
+    def _prioritize_links(self, links: set) -> list:
+        def link_score(link):
+            lower = link.lower()
+            if any(keyword in lower for keyword in self.career_keywords):
+                return 0
+            if any(keyword in lower for keyword in ("people", "about", "insight", "news")):
+                return 1
+            return 2
+
+        return sorted(list(links), key=link_score)

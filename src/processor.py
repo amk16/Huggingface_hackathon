@@ -3,7 +3,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -19,10 +19,44 @@ class FirmIntelligence(BaseModel):
     sector_focus: List[str] = Field(description="Top 3 industries they serve")
 
 
+class CareerOpening(BaseModel):
+    title: str = Field(default="", description="Role title or program name")
+    practice_area: str = Field(default="", description="Practice area or business unit")
+    location: str = Field(default="", description="Primary office or location mentioned")
+    experience_level: str = Field(default="", description="Student, trainee, associate, etc.")
+    application_deadline: str = Field(default="", description="Deadline text if provided")
+    application_link: str = Field(default="", description="Direct application link if available")
+    notes: str = Field(default="", description="Any other useful detail such as contract length")
+
+
+class CareerInsights(BaseModel):
+    hiring_focus: str = Field(default="", description="Summary of what the firm is recruiting for right now")
+    application_channels: List[str] = Field(default_factory=list, description="Where or how to apply")
+    benefits: List[str] = Field(default_factory=list, description="Key perks or benefits highlighted")
+    interview_process: str = Field(default="", description="How the interview/assessment process works")
+    candidate_tips: List[str] = Field(default_factory=list, description="Advice or qualities the firm emphasizes")
+    current_openings: List[CareerOpening] = Field(default_factory=list, description="Specific openings found on the career page")
+
+
 class DataProcessor:
     def __init__(self):
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         self.parser = JsonOutputParser(pydantic_object=FirmIntelligence)
+        self.career_parser = JsonOutputParser(pydantic_object=CareerInsights)
+        self.career_prompt = PromptTemplate(
+            template="""
+            You are a Career Consultant summarizing what applicants should know about this firm.
+
+            Follow the requested JSON structure and only include items that appear in the text.
+
+            {format_instructions}
+
+            CAREER PAGE TEXT:
+            {text}
+            """,
+            input_variables=["text"],
+            partial_variables={"format_instructions": self.career_parser.get_format_instructions()},
+        )
 
     def extract_intelligence(self, raw_text):
         prompt = PromptTemplate(
@@ -46,6 +80,33 @@ class DataProcessor:
             return chain.invoke({"text": raw_text[:15000]})
         except Exception as e:
             logger.error("LLM Extraction Error: %s", e)
+            return None
+
+    def extract_career_insights(self, career_sections: List[dict], fallback_text: str) -> Optional[CareerInsights]:
+        """Extract structured information directly from the firm's career pages."""
+        if not career_sections and not fallback_text:
+            return None
+
+        if career_sections:
+            snippets = []
+            for section in career_sections[:6]:
+                text = section.get("text", "")
+                if not text:
+                    continue
+                snippets.append(f"URL: {section.get('url', '')}\n{text}")
+            source_text = "\n\n".join(snippets)
+        else:
+            source_text = fallback_text
+
+        if not source_text:
+            return None
+
+        chain = self.career_prompt | self.llm | self.career_parser
+
+        try:
+            return chain.invoke({"text": source_text[:15000]})
+        except Exception as e:
+            logger.error("Career insights extraction error: %s", e)
             return None
     
     def extract_job_keywords_tone(self, jobs_data: list):
